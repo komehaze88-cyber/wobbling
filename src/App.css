@@ -17,17 +17,39 @@ canvas {
   display: block;
 }
 
-.controls {
+.controls-container {
   position: fixed;
   bottom: 20px;
   left: 50%;
   transform: translateX(-50%);
+  display: flex;
+  gap: 12px;
+}
+
+.controls {
   background: rgba(255, 255, 255, 0.1);
   padding: 16px 24px;
   border-radius: 12px;
   backdrop-filter: blur(10px);
   display: flex;
+  flex-wrap: wrap;
   gap: 24px;
+  max-width: 400px;
+}
+
+.controls-title {
+  width: 100%;
+  color: white;
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  text-align: center;
+}
+
+.global-controls {
+  max-width: 160px;
+  align-self: flex-start;
 }
 
 .slider-group {
@@ -93,4 +115,23 @@ canvas {
   background: rgba(255, 255, 255, 0.2);
   border-color: rgba(255, 255, 255, 0.6);
   color: white;
+}
+
+.wallpaper-toggle {
+  width: 100%;
+  padding: 8px 16px;
+  margin-top: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  font-family: system-ui, sans-serif;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.wallpaper-toggle:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.5);
 }
