@@ -1,6 +1,50 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
 
+const TAU = Math.PI * 2;
+
+function gcdInt(a: number, b: number) {
+  let x = Math.abs(a | 0);
+  let y = Math.abs(b | 0);
+  while (y !== 0) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x;
+}
+
+function pickCoprimeStep(mod: number, avoid: ReadonlySet<number>) {
+  if (mod <= 2) return 1;
+
+  const candidates = [7, 11, 13, 17, 19, 5, 3, 2];
+  for (const candidate of candidates) {
+    const step = candidate % mod;
+    if (step <= 1) continue;
+    if (avoid.has(step)) continue;
+    if (gcdInt(step, mod) === 1) return step;
+  }
+
+  for (let step = 2; step < mod; step++) {
+    if (avoid.has(step)) continue;
+    if (gcdInt(step, mod) === 1) return step;
+  }
+
+  return 1;
+}
+
+function hash32(seed: number) {
+  let x = seed | 0;
+  x = Math.imul(x ^ (x >>> 16), 0x7feb352d);
+  x = Math.imul(x ^ (x >>> 15), 0x846ca68b);
+  x = x ^ (x >>> 16);
+  return x >>> 0;
+}
+
+function rand01(seed: number) {
+  return hash32(seed) / 4294967296;
+}
+
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [speed, setSpeed] = useState(1);
@@ -48,28 +92,48 @@ function App() {
       const segments = 360;
       const time = timeRef.current;
 
+      // 周波数を整数に丸めて円周上で周期が完結するようにする
+      const baseFreq1 = Math.round(wobbleFrequency);
+      const baseFreq2 = Math.round(wobbleFrequency * 2);
+      const baseFreq3 = Math.round(wobbleFrequency * 4);
+
+      // `Individual Frequency` 時に倍音成分のオフセットを独立させ、似通いを減らす
+      let step2 = 1;
+      let step3 = 1;
+      if (individualFrequency && circleCount > 1) {
+        const avoid = new Set<number>();
+        step2 = pickCoprimeStep(circleCount, avoid);
+        avoid.add(step2);
+        step3 = pickCoprimeStep(circleCount, avoid);
+      }
+
       for (let c = 0; c < circleCount; c++) {
-        const phaseOffset = (c / circleCount) * Math.PI * 2;
+        const phaseOffset = (c / circleCount) * TAU;
         const radiusOffset = c * radiusStep;
 
         ctx.beginPath();
 
-        // 周波数を整数に丸めて円周上で周期が完結するようにする
-        const freqOffset = individualFrequency ? c : 0;
-        const freq1 = Math.round(wobbleFrequency) + freqOffset;
-        const freq2 = Math.round(wobbleFrequency * 2) + freqOffset * 2;
-        const freq3 = Math.round(wobbleFrequency * 4) + freqOffset * 3;
+        const freq1 = baseFreq1 + (individualFrequency ? c : 0);
+        const idx2 = individualFrequency ? (c * step2) % circleCount : 0;
+        const idx3 = individualFrequency ? (c * step3) % circleCount : 0;
+        const freq2 = baseFreq2 + idx2;
+        const freq3 = baseFreq3 + idx3;
 
-        // 各円に角度方向の初期位相オフセットを追加（始点付近の類似を防ぐ）
-        const anglePhaseOffset = individualFrequency ? c * Math.PI * 0.618 : 0; // 黄金比で分散
+        // 各円・各成分に初期位相を追加（似通いを防ぐ、フレーム間で固定）
+        const phaseSeed = baseFreq1 * 100_000 + circleCount * 1_000 + c;
+        const phase1 = individualFrequency ? rand01(phaseSeed + 1) * TAU : 0;
+        const phase2 = individualFrequency ? rand01(phaseSeed + 2) * TAU : 0;
+        const phase3 = individualFrequency ? rand01(phaseSeed + 3) * TAU : 0;
 
         for (let i = 0; i < segments; i++) {
-          const angle = (i / segments) * Math.PI * 2;
+          const angle = (i / segments) * TAU;
 
           const wobble =
-            Math.sin(angle * freq1 + anglePhaseOffset + time * 2 + phaseOffset) * wobbleAmount * 0.5 +
-            Math.sin(angle * freq2 + anglePhaseOffset * 1.5 - time * 1.5 + phaseOffset) * wobbleAmount * 0.3 +
-            Math.sin(angle * freq3 + anglePhaseOffset * 2.3 + time * 0.8 + c * 1.3) * wobbleAmount * 0.2;
+            Math.sin(angle * freq1 + time * 2 + phaseOffset + phase1) * wobbleAmount * 0.5 +
+            Math.sin(angle * freq2 - time * 1.5 + phaseOffset + phase2) * wobbleAmount * 0.3 +
+            Math.sin(angle * freq3 + time * 0.8 + (individualFrequency ? phaseOffset + phase3 : c * 1.3)) *
+              wobbleAmount *
+              0.2;
 
           const r = baseRadius - radiusOffset + wobble;
           const x = centerX + Math.cos(angle) * r;
