@@ -27,24 +27,20 @@ pub enum WallpaperError {
 
 type WallpaperResult<T> = std::result::Result<T, WallpaperError>;
 
-#[derive(Default)]
-struct WallpaperState {
-    is_active: bool,
-    original_parent: Option<isize>,
+#[derive(Clone, Copy)]
+struct WallpaperSession {
+    original_parent: Option<HWND>,
     original_style: i32,
     original_ex_style: i32,
-    original_rect: Option<RECT>,
-    worker_w: Option<isize>,
+    original_rect: RECT,
 }
 
-static STATE: Mutex<WallpaperState> = Mutex::new(WallpaperState {
-    is_active: false,
-    original_parent: None,
-    original_style: 0,
-    original_ex_style: 0,
-    original_rect: None,
-    worker_w: None,
-});
+#[derive(Default)]
+struct WallpaperState {
+    session: Option<WallpaperSession>,
+}
+
+static STATE: Mutex<WallpaperState> = Mutex::new(WallpaperState { session: None });
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MonitorInfo {
@@ -66,6 +62,123 @@ fn find_progman() -> WallpaperResult<HWND> {
         }
         Ok(hwnd)
     }
+}
+
+fn hwnd_from_isize(hwnd: isize) -> WallpaperResult<HWND> {
+    if hwnd == 0 {
+        return Err(WallpaperError::InvalidWindowHandle);
+    }
+    Ok(HWND(hwnd as *mut _))
+}
+
+fn is_valid_window(window: HWND) -> bool {
+    unsafe { window.0 as usize != 0 && IsWindow(window).as_bool() }
+}
+
+fn win32_error(context: &str) -> WallpaperError {
+    WallpaperError::WindowsApi(format!(
+        "{}: {}",
+        context,
+        windows::core::Error::from_win32()
+    ))
+}
+
+unsafe fn capture_window_session(window: HWND) -> WallpaperResult<WallpaperSession> {
+    let original_parent = GetParent(window);
+    let original_style = GetWindowLongW(window, GWL_STYLE);
+    let original_ex_style = GetWindowLongW(window, GWL_EXSTYLE);
+
+    let mut rect = RECT::default();
+    if !GetWindowRect(window, &mut rect).as_bool() {
+        return Err(win32_error("GetWindowRect failed"));
+    }
+
+    Ok(WallpaperSession {
+        original_parent,
+        original_style,
+        original_ex_style,
+        original_rect: rect,
+    })
+}
+
+unsafe fn set_parent_checked(window: HWND, parent: Option<HWND>) -> WallpaperResult<()> {
+    let _ = SetParent(window, parent);
+    if GetParent(window) != parent {
+        return Err(WallpaperError::SetParentFailed);
+    }
+    Ok(())
+}
+
+unsafe fn apply_wallpaper_mode(
+    window: HWND,
+    worker_w: HWND,
+    session: &WallpaperSession,
+) -> WallpaperResult<()> {
+    // Remove window decorations
+    let new_style = session.original_style
+        & !(WS_CAPTION.0 as i32)
+        & !(WS_THICKFRAME.0 as i32)
+        & !(WS_MINIMIZEBOX.0 as i32)
+        & !(WS_MAXIMIZEBOX.0 as i32)
+        & !(WS_SYSMENU.0 as i32);
+    SetWindowLongW(window, GWL_STYLE, new_style);
+
+    // Remove extended styles
+    let new_ex_style = session.original_ex_style
+        & !(WS_EX_DLGMODALFRAME.0 as i32)
+        & !(WS_EX_CLIENTEDGE.0 as i32)
+        & !(WS_EX_STATICEDGE.0 as i32);
+    SetWindowLongW(window, GWL_EXSTYLE, new_ex_style);
+
+    // Set WorkerW as parent
+    set_parent_checked(window, Some(worker_w))?;
+
+    // Get virtual screen size (spans all monitors)
+    let (vx, vy, vw, vh) = get_virtual_screen();
+
+    // Resize window to cover all monitors
+    if !SetWindowPos(
+        window,
+        Some(HWND_TOP),
+        vx,
+        vy,
+        vw,
+        vh,
+        SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+    )
+    .as_bool()
+    {
+        return Err(win32_error("SetWindowPos failed"));
+    }
+
+    Ok(())
+}
+
+unsafe fn restore_from_session(window: HWND, session: &WallpaperSession) -> WallpaperResult<()> {
+    // Restore original parent
+    set_parent_checked(window, session.original_parent)?;
+
+    // Restore original style
+    SetWindowLongW(window, GWL_STYLE, session.original_style);
+    SetWindowLongW(window, GWL_EXSTYLE, session.original_ex_style);
+
+    // Restore original position and size
+    let rect = session.original_rect;
+    if !SetWindowPos(
+        window,
+        Some(HWND_TOP),
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+    )
+    .as_bool()
+    {
+        return Err(win32_error("SetWindowPos failed"));
+    }
+
+    Ok(())
 }
 
 /// Send undocumented message 0x052C to Progman to spawn WorkerW
@@ -98,8 +211,13 @@ fn find_worker_w() -> WallpaperResult<HWND> {
                 break;
             }
 
-            let shell_view = FindWindowExW(Some(hwnd), None, windows::core::w!("SHELLDLL_DefView"), None)
-                .unwrap_or(HWND(std::ptr::null_mut()));
+            let shell_view = FindWindowExW(
+                Some(hwnd),
+                None,
+                windows::core::w!("SHELLDLL_DefView"),
+                None,
+            )
+            .unwrap_or(HWND(std::ptr::null_mut()));
             if shell_view.0 as usize != 0 {
                 // Found the WorkerW with SHELLDLL_DefView, now get its sibling
                 worker_w = FindWindowExW(None, Some(hwnd), windows::core::w!("WorkerW"), None)
@@ -129,13 +247,17 @@ fn get_virtual_screen() -> (i32, i32, i32, i32) {
 
 /// Set the window as desktop wallpaper
 pub fn set_as_wallpaper(hwnd: isize) -> WallpaperResult<()> {
+    let window = hwnd_from_isize(hwnd)?;
+
     let mut state = STATE.lock().unwrap();
 
-    if state.is_active {
+    if state.session.is_some() {
         return Err(WallpaperError::AlreadyWallpaperMode);
     }
 
-    let window = HWND(hwnd as *mut _);
+    if !is_valid_window(window) {
+        return Err(WallpaperError::InvalidWindowHandle);
+    }
 
     // Find Progman and spawn WorkerW
     let progman = find_progman()?;
@@ -146,102 +268,44 @@ pub fn set_as_wallpaper(hwnd: isize) -> WallpaperResult<()> {
 
     let worker_w = find_worker_w()?;
 
-    unsafe {
-        // Store original parent
-        let parent_result = GetParent(window);
-        state.original_parent = Some(parent_result.unwrap_or(HWND(std::ptr::null_mut())).0 as isize);
-
-        // Store original window style
-        state.original_style = GetWindowLongW(window, GWL_STYLE);
-        state.original_ex_style = GetWindowLongW(window, GWL_EXSTYLE);
-
-        // Store original window rect
-        let mut rect = RECT::default();
-        let _ = GetWindowRect(window, &mut rect);
-        state.original_rect = Some(rect);
-
-        // Remove window decorations
-        let new_style = state.original_style & !(WS_CAPTION.0 as i32)
-            & !(WS_THICKFRAME.0 as i32)
-            & !(WS_MINIMIZEBOX.0 as i32)
-            & !(WS_MAXIMIZEBOX.0 as i32)
-            & !(WS_SYSMENU.0 as i32);
-        SetWindowLongW(window, GWL_STYLE, new_style);
-
-        // Remove extended styles
-        let new_ex_style = state.original_ex_style & !(WS_EX_DLGMODALFRAME.0 as i32)
-            & !(WS_EX_CLIENTEDGE.0 as i32)
-            & !(WS_EX_STATICEDGE.0 as i32);
-        SetWindowLongW(window, GWL_EXSTYLE, new_ex_style);
-
-        // Set WorkerW as parent
-        let _ = SetParent(window, Some(worker_w));
-
-        // Get virtual screen size (spans all monitors)
-        let (vx, vy, vw, vh) = get_virtual_screen();
-
-        // Resize window to cover all monitors
-        let _ = SetWindowPos(
-            window,
-            Some(HWND_TOP),
-            vx,
-            vy,
-            vw,
-            vh,
-            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
-        );
-
-        state.worker_w = Some(worker_w.0 as isize);
-        state.is_active = true;
+    let session = unsafe { capture_window_session(window)? };
+    if let Err(err) = unsafe { apply_wallpaper_mode(window, worker_w, &session) } {
+        let _ = unsafe { restore_from_session(window, &session) };
+        return Err(err);
     }
+
+    state.session = Some(session);
 
     Ok(())
 }
 
 /// Restore window to normal mode
 pub fn restore_window(hwnd: isize) -> WallpaperResult<()> {
+    let window = hwnd_from_isize(hwnd)?;
+
     let mut state = STATE.lock().unwrap();
 
-    if !state.is_active {
+    let Some(session) = state.session else {
         return Err(WallpaperError::NotWallpaperMode);
-    }
+    };
 
-    let window = HWND(hwnd as *mut _);
+    if !is_valid_window(window) {
+        state.session = None;
+        return Err(WallpaperError::InvalidWindowHandle);
+    }
 
     unsafe {
-        // Remove from WorkerW (set parent to desktop/null)
-        let _ = SetParent(window, None);
-
-        // Restore original style
-        SetWindowLongW(window, GWL_STYLE, state.original_style);
-        SetWindowLongW(window, GWL_EXSTYLE, state.original_ex_style);
-
-        // Restore original position and size
-        if let Some(rect) = state.original_rect {
-            let _ = SetWindowPos(
-                window,
-                Some(HWND_TOP),
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                SWP_FRAMECHANGED | SWP_SHOWWINDOW,
-            );
-        }
+        restore_from_session(window, &session)?;
     }
 
-    // Reset state
-    state.is_active = false;
-    state.original_parent = None;
-    state.original_rect = None;
-    state.worker_w = None;
+    state.session = None;
 
     Ok(())
 }
 
 /// Check if currently in wallpaper mode
 pub fn is_wallpaper_mode() -> bool {
-    STATE.lock().unwrap().is_active
+    STATE.lock().unwrap().session.is_some()
 }
 
 /// Get information about all connected monitors

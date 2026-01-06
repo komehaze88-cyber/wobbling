@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { useEffect, useRef, useState } from "react";
 import { load, Store } from "@tauri-apps/plugin-store";
+import { useWallpaperMode } from "./hooks/useWallpaperMode";
 import "./App.css";
 
 const TAU = Math.PI * 2;
@@ -81,7 +80,7 @@ function App() {
   const [leftSettings, setLeftSettings] = useState<CircleSettings>({ ...defaultSettings });
   const [rightSettings, setRightSettings] = useState<CircleSettings>({ ...defaultSettings });
   const [targetFps, setTargetFps] = useState(60);
-  const [isWallpaperMode, setIsWallpaperMode] = useState(false);
+  const { isWallpaperMode, toggleWallpaperMode } = useWallpaperMode();
   const [isLoading, setIsLoading] = useState(true);
   const leftTimeRef = useRef(0);
   const rightTimeRef = useRef(0);
@@ -132,32 +131,6 @@ function App() {
 
     saveSettings();
   }, [leftSettings, rightSettings, targetFps, isLoading]);
-
-  // Listen for wallpaper mode changes from system tray
-  useEffect(() => {
-    const unlisten = listen<boolean>("wallpaper-mode-changed", (event) => {
-      setIsWallpaperMode(event.payload);
-    });
-
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, []);
-
-  // Toggle wallpaper mode
-  const toggleWallpaperMode = useCallback(async () => {
-    try {
-      if (isWallpaperMode) {
-        await invoke("disable_wallpaper_mode");
-        setIsWallpaperMode(false);
-      } else {
-        await invoke("enable_wallpaper_mode");
-        setIsWallpaperMode(true);
-      }
-    } catch (error) {
-      console.error("Failed to toggle wallpaper mode:", error);
-    }
-  }, [isWallpaperMode]);
 
   // Keyboard shortcut to exit wallpaper mode
   useEffect(() => {

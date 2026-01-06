@@ -4,9 +4,10 @@ mod wallpaper;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Emitter,
-    Manager,
+    Emitter, Manager,
 };
+
+const WALLPAPER_MODE_CHANGED_EVENT: &str = "wallpaper-mode-changed";
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -17,7 +18,9 @@ fn greet(name: &str) -> String {
 #[tauri::command]
 fn enable_wallpaper_mode(window: tauri::Window) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    wallpaper::set_as_wallpaper(hwnd.0 as isize).map_err(|e| e.to_string())
+    wallpaper::set_as_wallpaper(hwnd.0 as isize).map_err(|e| e.to_string())?;
+    let _ = window.emit(WALLPAPER_MODE_CHANGED_EVENT, wallpaper::is_wallpaper_mode());
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -30,7 +33,9 @@ fn enable_wallpaper_mode(_window: tauri::Window) -> Result<(), String> {
 #[tauri::command]
 fn disable_wallpaper_mode(window: tauri::Window) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    wallpaper::restore_window(hwnd.0 as isize).map_err(|e| e.to_string())
+    wallpaper::restore_window(hwnd.0 as isize).map_err(|e| e.to_string())?;
+    let _ = window.emit(WALLPAPER_MODE_CHANGED_EVENT, wallpaper::is_wallpaper_mode());
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -87,22 +92,37 @@ pub fn run() {
                             #[cfg(windows)]
                             {
                                 if wallpaper::is_wallpaper_mode() {
-                                    let hwnd = window.hwnd().unwrap();
-                                    let _ = wallpaper::restore_window(hwnd.0 as isize);
+                                    if let Ok(hwnd) = window.hwnd() {
+                                        let _ = wallpaper::restore_window(hwnd.0 as isize);
+                                    }
                                 }
                             }
                             let _ = window.show();
                             let _ = window.set_focus();
-                            let _ = window.emit("wallpaper-mode-changed", false);
+                            #[cfg(windows)]
+                            {
+                                let _ = window.emit(
+                                    WALLPAPER_MODE_CHANGED_EVENT,
+                                    wallpaper::is_wallpaper_mode(),
+                                );
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                let _ = window.emit(WALLPAPER_MODE_CHANGED_EVENT, false);
+                            }
                         }
                     }
                     "hide" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            #[cfg(windows)]
-                            {
-                                let hwnd = window.hwnd().unwrap();
-                                let _ = wallpaper::set_as_wallpaper(hwnd.0 as isize);
-                                let _ = window.emit("wallpaper-mode-changed", true);
+                        #[cfg(windows)]
+                        {
+                            if let Some(window) = app.get_webview_window("main") {
+                                if let Ok(hwnd) = window.hwnd() {
+                                    let _ = wallpaper::set_as_wallpaper(hwnd.0 as isize);
+                                }
+                                let _ = window.emit(
+                                    WALLPAPER_MODE_CHANGED_EVENT,
+                                    wallpaper::is_wallpaper_mode(),
+                                );
                             }
                         }
                     }
@@ -111,8 +131,9 @@ pub fn run() {
                         {
                             if let Some(window) = app.get_webview_window("main") {
                                 if wallpaper::is_wallpaper_mode() {
-                                    let hwnd = window.hwnd().unwrap();
-                                    let _ = wallpaper::restore_window(hwnd.0 as isize);
+                                    if let Ok(hwnd) = window.hwnd() {
+                                        let _ = wallpaper::restore_window(hwnd.0 as isize);
+                                    }
                                 }
                             }
                         }
